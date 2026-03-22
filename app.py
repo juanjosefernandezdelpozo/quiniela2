@@ -13,16 +13,6 @@ st.set_page_config(page_title="Quiniela Cloud DB", layout="wide")
 st.title("📊 Analizador de Quiniela + Base de Datos Cloud")
 st.write("El script guarda los resultados en Google Sheets para crear un histórico permanente.")
 
-# --- CONEXIÓN A GOOGLE SHEETS ---
-conn = st.connection("gsheets", type=GSheetsConnection)
-
-_gsheets_error = None
-try:
-    df_historico = conn.read()
-except Exception as e:
-    df_historico = pd.DataFrame()
-    _gsheets_error = str(e)
-
 
 def _jornada_desde_html(soup):
     """La web muestra la jornada en un <b>Jornada N</b>; las URLs /jornada-X/ suelen redirigir a la misma página."""
@@ -36,83 +26,130 @@ def _jornada_desde_html(soup):
     return None
 
 
-def scrape_jornada(n_jornada):
-    """
-    La tabla ya no usa class='table-quiniela'; ahora es table.lya[data-type='tips-results'].
-    Cada fila tiene 5 td: partido (equipos), goles, signo, sis., una sola cuota (HTML estático).
-    """
-    url = f"https://www.casasdeapuestas.com/quiniela/resultados/jornada-{n_jornada}/"
-    headers = {
+def _request_headers():
+    return {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
     }
 
+
+def _partidos_desde_soup(soup, n_jornada_fallback):
+    """
+    La tabla ya no usa class='table-quiniela'; ahora es table.lya[data-type='tips-results'].
+    Cada fila tiene 5 td: partido (equipos), goles, signo, sis., una sola cuota (HTML estático).
+    """
+    tabla = soup.select_one('table.lya[data-type="tips-results"]')
+    if not tabla:
+        tabla = soup.find("table", class_="lya")
+    if not tabla:
+        return []
+
+    jornada_real = _jornada_desde_html(soup)
+    if jornada_real is None:
+        jornada_real = int(n_jornada_fallback)
+
+    partidos = []
+    for fila in tabla.find_all("tr"):
+        if "thead" in (fila.get("class") or []):
+            continue
+        cols = fila.find_all("td", recursive=False)
+        if len(cols) < 5:
+            continue
+
+        teams = cols[0].select_one(".event-teams")
+        if not teams:
+            continue
+        nombres = [s.strip() for s in teams.stripped_strings if s.strip()]
+        if len(nombres) < 2:
+            continue
+        equipo_local, equipo_visitante = nombres[0], nombres[1]
+
+        resultado_final = cols[2].get_text(strip=True)
+        odd_el = cols[4].select_one(".odd-content")
+        if not odd_el:
+            continue
+        try:
+            cuota_val = float(odd_el.get_text(strip=True).replace(",", "."))
+        except ValueError:
+            continue
+
+        bookie = ""
+        odd_wrap = cols[4].select_one(".odd")
+        oc = odd_wrap.get("onclick") if odd_wrap else None
+        if oc:
+            m = re.search(r"bookie:'([^']+)'", oc)
+            if m:
+                bookie = m.group(1)
+
+        partidos.append(
+            {
+                "Jornada": jornada_real,
+                "Partido": f"{equipo_local} vs {equipo_visitante}",
+                "Resultado": resultado_final,
+                "Favorito Casa": "N/D",
+                "Cuota Favorito": cuota_val,
+                "Casa cuota": bookie or None,
+                "Acierto": pd.NA,
+            }
+        )
+    return partidos
+
+
+def scrape_jornada(n_jornada):
+    url = f"https://www.casasdeapuestas.com/quiniela/resultados/jornada-{n_jornada}/"
     try:
-        response = requests.get(url, headers=headers, timeout=15)
+        response = requests.get(url, headers=_request_headers(), timeout=15)
         if response.status_code != 200:
             return None
-
         soup = BeautifulSoup(response.text, "html.parser")
-        tabla = soup.select_one('table.lya[data-type="tips-results"]')
-        if not tabla:
-            tabla = soup.find("table", class_="lya")
-
-        if not tabla:
-            return None
-
-        jornada_real = _jornada_desde_html(soup)
-        if jornada_real is None:
-            jornada_real = int(n_jornada)
-
-        partidos = []
-        for fila in tabla.find_all("tr"):
-            if "thead" in (fila.get("class") or []):
-                continue
-            cols = fila.find_all("td", recursive=False)
-            if len(cols) < 5:
-                continue
-
-            teams = cols[0].select_one(".event-teams")
-            if not teams:
-                continue
-            nombres = [s.strip() for s in teams.stripped_strings if s.strip()]
-            if len(nombres) < 2:
-                continue
-            equipo_local, equipo_visitante = nombres[0], nombres[1]
-
-            resultado_final = cols[2].get_text(strip=True)
-            odd_el = cols[4].select_one(".odd-content")
-            if not odd_el:
-                continue
-            try:
-                cuota_val = float(odd_el.get_text(strip=True).replace(",", "."))
-            except ValueError:
-                continue
-
-            bookie = ""
-            odd_wrap = cols[4].select_one(".odd")
-            oc = odd_wrap.get("onclick") if odd_wrap else None
-            if oc:
-                m = re.search(r"bookie:'([^']+)'", oc)
-                if m:
-                    bookie = m.group(1)
-
-            partidos.append(
-                {
-                    "Jornada": jornada_real,
-                    "Partido": f"{equipo_local} vs {equipo_visitante}",
-                    "Resultado": resultado_final,
-                    "Favorito Casa": "N/D",
-                    "Cuota Favorito": cuota_val,
-                    "Casa cuota": bookie or None,
-                    "Acierto": pd.NA,
-                }
-            )
+        partidos = _partidos_desde_soup(soup, n_jornada)
         return partidos if partidos else None
     except Exception:
         return None
+
+
+# --- CONEXIÓN A GOOGLE SHEETS ---
+conn = st.connection("gsheets", type=GSheetsConnection)
+
+_gsheets_error = None
+try:
+    df_historico = conn.read()
+except Exception as e:
+    df_historico = pd.DataFrame()
+    _gsheets_error = str(e)
+
+
+with st.expander("🔍 Vista previa del scrape (1 fila)", expanded=True):
+    st.caption(
+        "Comprueba si el servidor donde corre la app puede leer la web y si el HTML sigue coincidiendo con el parser."
+    )
+    j_prev = st.number_input("Jornada en la URL de prueba", min_value=1, value=1, key="j_prev_preview")
+    if st.button("Probar y mostrar 1ª fila", key="btn_scrape_preview"):
+        url_prev = f"https://www.casasdeapuestas.com/quiniela/resultados/jornada-{j_prev}/"
+        try:
+            r = requests.get(url_prev, headers=_request_headers(), timeout=20)
+            st.markdown(
+                f"**HTTP** `{r.status_code}` · **URL final** `{r.url}` · **Tamaño HTML** `{len(r.text):,}` caracteres"
+            )
+            soup = BeautifulSoup(r.text, "html.parser")
+            partidos_prev = _partidos_desde_soup(soup, j_prev)
+            st.write(f"Filas parseadas: **{len(partidos_prev)}**")
+            if partidos_prev:
+                st.success("Primera fila (mismo formato que se guardaría en la hoja):")
+                st.dataframe(pd.DataFrame([partidos_prev[0]]), use_container_width=True)
+            else:
+                st.warning(
+                    "La página respondió pero el parser no extrajo ningún partido "
+                    "(cambio de HTML, bloqueo geográfico o contenido cargado solo con JavaScript)."
+                )
+                tiene_lya = "lya" in r.text and "tips-results" in r.text
+                st.caption(
+                    f"¿Aparece la tabla esperada en el HTML bruto? Indicio `lya` + `tips-results`: **{tiene_lya}**"
+                )
+        except Exception as e:
+            st.error(f"No se pudo descargar la página: `{e}`")
 
 
 # --- INTERFAZ DE USUARIO ---
