@@ -27,11 +27,15 @@ def _jornada_desde_html(soup):
 
 
 def _request_headers():
+    # Cabeceras de navegador: a veces evitan 403; muchas veces el bloqueo es por IP (datacenter / Cloud).
     return {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
             "(KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-        )
+        ),
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+        "Accept-Language": "es-ES,es;q=0.9,en;q=0.8",
+        "Referer": "https://www.casasdeapuestas.com/",
     }
 
 
@@ -133,21 +137,38 @@ with st.expander("🔍 Vista previa del scrape (1 fila)", expanded=True):
             st.markdown(
                 f"**HTTP** `{r.status_code}` · **URL final** `{r.url}` · **Tamaño HTML** `{len(r.text):,}` caracteres"
             )
-            soup = BeautifulSoup(r.text, "html.parser")
-            partidos_prev = _partidos_desde_soup(soup, j_prev)
-            st.write(f"Filas parseadas: **{len(partidos_prev)}**")
-            if partidos_prev:
-                st.success("Primera fila (mismo formato que se guardaría en la hoja):")
-                st.dataframe(pd.DataFrame([partidos_prev[0]]), use_container_width=True)
-            else:
-                st.warning(
-                    "La página respondió pero el parser no extrajo ningún partido "
-                    "(cambio de HTML, bloqueo geográfico o contenido cargado solo con JavaScript)."
+            if r.status_code == 403:
+                st.error(
+                    "**403 Forbidden:** el servidor **no autoriza** esta petición. "
+                    "Suele ser protección anti-bot o **bloqueo de IPs** (muy frecuente desde Streamlit Cloud, "
+                    "Railway, Fly.io, etc.). No es un fallo del parser: **no estás recibiendo la página real de resultados**."
                 )
-                tiene_lya = "lya" in r.text and "tips-results" in r.text
-                st.caption(
-                    f"¿Aparece la tabla esperada en el HTML bruto? Indicio `lya` + `tips-results`: **{tiene_lya}**"
+                st.info(
+                    "**Opciones:** ejecutar la app **en tu PC** (misma red que tu navegador), usar un **origen de datos** "
+                    "que permita acceso automatizado, o comprobar si el sitio ofrece API / descarga oficial. "
+                    "Evitar el bloqueo de terceros puede violar sus términos de uso."
                 )
+            elif r.status_code != 200:
+                st.error(
+                    f"La respuesta no es 200 OK (`{r.status_code}`). El scraper no puede leer la tabla hasta que la descarga funcione."
+                )
+
+            if r.status_code == 200:
+                soup = BeautifulSoup(r.text, "html.parser")
+                partidos_prev = _partidos_desde_soup(soup, j_prev)
+                st.write(f"Filas parseadas: **{len(partidos_prev)}**")
+                if partidos_prev:
+                    st.success("Primera fila (mismo formato que se guardaría en la hoja):")
+                    st.dataframe(pd.DataFrame([partidos_prev[0]]), use_container_width=True)
+                else:
+                    st.warning(
+                        "HTTP 200 pero el parser no extrajo ningún partido "
+                        "(HTML distinto o tabla cargada solo con JavaScript en tu entorno)."
+                    )
+                    tiene_lya = "lya" in r.text and "tips-results" in r.text
+                    st.caption(
+                        f"¿Aparece la tabla esperada en el HTML bruto? Indicio `lya` + `tips-results`: **{tiene_lya}**"
+                    )
         except Exception as e:
             st.error(f"No se pudo descargar la página: `{e}`")
 
@@ -160,6 +181,9 @@ if _gsheets_error:
 st.sidebar.caption(
     "Nota: la web suele mostrar solo la **jornada actual**; "
     "las URLs jornada-1, jornada-2, etc. pueden redirigir a la misma página."
+)
+st.sidebar.caption(
+    "Si ves **HTTP 403** en la vista previa, el hosting (p. ej. Streamlit Cloud) suele estar **bloqueado** por el sitio; prueba en local."
 )
 
 jornada_inicio = st.sidebar.number_input("Desde Jornada:", min_value=1, value=1)
